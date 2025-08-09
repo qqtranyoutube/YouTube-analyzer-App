@@ -29,11 +29,9 @@ max_results = st.sidebar.slider('Search max results per call', min_value=5, max_
 # New: channel ID input for public data (required if no OAuth)
 channel_id_input = st.sidebar.text_input('Channel ID (required if not using OAuth)', value='')
 
-# Helper: ISO timestamp for start of today in UTC
-def today_iso_start_utc():
-    now = datetime.now(timezone.utc)
-    start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
-    return start.isoformat()
+# Helper: ISO timestamp for 24 hours ago in UTC (expanded window for debug)
+def default_published_after():
+    return (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 
 # Build YouTube API client (Data API)
 @st.cache_resource
@@ -51,7 +49,7 @@ def run_oauth_flow(client_secrets_file: str):
     creds = flow.run_local_server(port=0)
     return creds
 
-# Get videos published today (search + videos().list)
+# Get videos published today (search + videos().list) with debug
 def fetch_videos_published_today(youtube, published_after_iso, max_results=10):
     try:
         req = youtube.search().list(
@@ -62,7 +60,13 @@ def fetch_videos_published_today(youtube, published_after_iso, max_results=10):
             maxResults=max_results
         )
         res = req.execute()
-        video_ids = [item['id']['videoId'] for item in res.get('items', [])]
+        # DEBUG: Show raw search response
+        st.write("Debug: Raw search response", res)
+
+        video_ids = [item['id']['videoId'] for item in res.get('items', []) if 'videoId' in item['id']]
+        # DEBUG: Show extracted video IDs
+        st.write(f"Debug: Video IDs found ({len(video_ids)}):", video_ids)
+
         if not video_ids:
             return []
         vids = []
@@ -179,7 +183,8 @@ with col1:
     st.header('Realtime / Today Feeds')
     if yt:
         if st.button('Fetch videos published today'):
-            start_iso = today_iso_start_utc()
+            # Use 24 hours ago for publishedAfter (expanded window)
+            start_iso = default_published_after()
             vids = fetch_videos_published_today(yt, start_iso, max_results=max_results)
             if not vids:
                 st.info('No videos found for today (or API returned none).')
