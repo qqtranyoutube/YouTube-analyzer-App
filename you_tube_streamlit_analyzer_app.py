@@ -6,6 +6,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google_auth_oauthlib.flow import InstalledAppFlow
 import os
+import json
 
 # --------------------- CONFIG & SCOPE ---------------------
 SCOPES = [
@@ -81,6 +82,9 @@ def fetch_video_analytics_map(analytics, channel_id, video_ids, lookback_days=7)
     except HttpError as e:
         st.warning(f"Analytics API error fetching per-video analytics: {e}")
         return {}
+    except Exception as e:
+        st.warning(f"Analytics fetching error: {e}")
+        return {}
 
 # --------------------- FETCH VIDEOS + MONETIZATION + RPM ---------------------
 def fetch_recent_videos_full(youtube, published_after_iso, max_results=10, analytics=None, channel_id_for_analytics=None):
@@ -98,8 +102,9 @@ def fetch_recent_videos_full(youtube, published_after_iso, max_results=10, analy
             maxResults=max_results,
             q='a'  # broad query to increase results
         ).execute()
-        # debug raw response is helpful
-        st.debug("Raw search response:", search_response)
+        # debug output
+        st.write("Debug: Raw search response (truncated):")
+        st.json({k: search_response.get(k) for k in ("kind", "etag", "pageInfo", "items") if k in search_response})
 
         video_ids = [item['id']['videoId'] for item in search_response.get('items', []) if 'videoId' in item['id']]
         st.write(f"Debug: Video IDs found ({len(video_ids)}): {video_ids}")
@@ -145,6 +150,9 @@ def fetch_recent_videos_full(youtube, published_after_iso, max_results=10, analy
             st.error("YouTube API quota exceeded or access denied.")
         else:
             st.error(f"YouTube API error: {e}")
+        return []
+    except Exception as e:
+        st.error(f"Unexpected error fetching recent videos: {e}")
         return []
 
 def fetch_today_videos_full(youtube, analytics=None, channel_id_for_analytics=None, max_results_today=50):
@@ -219,6 +227,9 @@ def fetch_today_videos_full(youtube, analytics=None, channel_id_for_analytics=No
     except HttpError as e:
         st.error(f"YouTube API error: {e}")
         return []
+    except Exception as e:
+        st.error(f"Unexpected error fetching today's videos: {e}")
+        return []
 
 # --------------------- CHANNEL & MONETIZATION ---------------------
 def get_channel_stats(youtube, credentials=None, channel_id=None):
@@ -248,6 +259,9 @@ def get_channel_stats(youtube, credentials=None, channel_id=None):
     except HttpError as e:
         st.error(f'Error fetching channel info: {e}')
         return None
+    except Exception as e:
+        st.error(f"Unexpected error fetching channel info: {e}")
+        return None
 
 def get_channel_monetization_status(youtube):
     try:
@@ -258,6 +272,9 @@ def get_channel_monetization_status(youtube):
         return items[0].get('status', {})
     except HttpError as e:
         st.error(f"Error fetching channel monetization status: {e}")
+        return None
+    except Exception as e:
+        st.error(f"Unexpected error fetching monetization status: {e}")
         return None
 
 # --------------------- ANALYTICS TIME-SERIES (unchanged) ---------------------
@@ -281,6 +298,9 @@ def fetch_analytics(analytics, channel_id, start_date, end_date):
     except HttpError as e:
         st.error(f'Analytics API error: {e}')
         return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Unexpected analytics error: {e}")
+        return pd.DataFrame()
 
 def compute_rpm(df):
     df = df.copy()
@@ -291,16 +311,17 @@ def compute_rpm(df):
 def main():
     credentials = None
     analytics = None
+    youtube_client = None
 
     # OAuth connect button
     if use_oauth:
         if os.path.exists(client_secrets_path):
             if st.sidebar.button('Connect via OAuth'):
                 try:
-                    creds = run_oauth_flow(client_secrets_path)
-                    credentials = creds
+                    credentials = run_oauth_flow(client_secrets_path)
                     st.success('OAuth connected — you can now fetch analytics & monetization.')
-                    analytics = build('youtubeAnalytics', 'v2', credentials=creds)
+                    # build analytics client now
+                    analytics = build('youtubeAnalytics', 'v2', credentials=credentials)
                 except Exception as e:
                     st.error(f"OAuth flow failed: {e}")
                     credentials = None
@@ -308,31 +329,30 @@ def main():
             st.sidebar.warning('client_secrets.json not found at provided path.')
 
     # Build YouTube client (either with OAuth creds or API key)
-    yt = None
-    if use_oauth and 'creds' in locals() and creds:
-        yt = build_youtube(credentials=creds)
+    if credentials:
+        youtube_client = build_youtube(credentials=credentials)
     elif api_key:
-        yt = build_youtube(api_key=api_key)
+        youtube_client = build_youtube(api_key=api_key)
 
     col1, col2 = st.columns([2, 1])
 
     # -------------- Realtime / Today Feeds --------------
     with col1:
         st.header('Realtime / Today Feeds')
-        if yt:
+        if youtube_client:
             if st.button('Fetch videos published recently'):
                 start_iso = default_published_after()
 
                 # determine channel id for analytics (if OAuth)
                 channel_id_for_analytics = None
-                if analytics:
-                    ch_info = get_channel_stats(yt, credentials=creds)
+                if analytics and credentials:
+                    ch_info = get_channel_stats(youtube_client, credentials=credentials)
                     channel_id_for_analytics = ch_info['id'] if ch_info else None
                 elif channel_id_input:
                     channel_id_for_analytics = channel_id_input
 
                 videos = fetch_recent_videos_full(
-                    yt,
+                    youtube_client,
                     published_after_iso=start_iso,
                     max_results=max_results,
                     analytics=analytics,
@@ -343,17 +363,16 @@ def main():
                     st.info('No videos found for recent period.')
                 else:
                     df = pd.DataFrame(videos)
-                    df['publishedAt'] = pd.to_datetime(df['publishedAt'])
-                    df = df.sort_values('publishedAt')
+                    if 'publishedAt' in df.columns:
+                        df['publishedAt'] = pd.to_datetime(df['publishedAt'])
+                        df = df.sort_values('publishedAt')
 
                     st.subheader('Recent Videos (with Monetization & RPM if available)')
-                    # show a nice table with the new columns
                     display_cols = ['title', 'videoId', 'publishedAt', 'viewCount', 'estimatedRevenue', 'rpm', 'monetization']
-                    # guard columns existence
                     display_cols = [c for c in display_cols if c in df.columns]
                     st.dataframe(df[display_cols])
 
-                    popular = df[df['viewCount'] >= 1000]
+                    popular = df[df['viewCount'] >= 1000] if 'viewCount' in df.columns else pd.DataFrame()
                     if not popular.empty:
                         st.subheader('Videos with ≥ 1000 views')
                         st.dataframe(popular[display_cols])
@@ -365,20 +384,20 @@ def main():
     # -------------- Channel Stats & Monetization --------------
     with col2:
         st.header('Channel / Analytics')
-        if yt:
+        if youtube_client:
             if st.button('Get channel statistics'):
-                ch = get_channel_stats(yt, credentials=creds if use_oauth and 'creds' in locals() else None,
-                                       channel_id=channel_id_input if not use_oauth else None)
+                ch = get_channel_stats(youtube_client, credentials=credentials if credentials else None,
+                                       channel_id=channel_id_input if not credentials else None)
                 if ch:
                     st.metric('Subscribers', f"{ch['subscribers']}")
                     st.metric('Channel Views', f"{ch['views']}")
                     st.metric('Total Videos', f"{ch['videos']}")
                     st.write('Channel status (API raw):')
-                    st.json(ch['status'])
+                    st.json(ch['status'] if 'status' in ch else {})
 
                     # show monetization status if OAuth
-                    if use_oauth and 'creds' in locals() and creds:
-                        monet = get_channel_monetization_status(yt)
+                    if credentials:
+                        monet = get_channel_monetization_status(youtube_client)
                         if monet:
                             st.subheader('Monetization Status (channel)')
                             st.json(monet)
@@ -394,8 +413,8 @@ def main():
         start_date = st.date_input('Start date', value=(datetime.now() - timedelta(days=7)).date())
         end_date = st.date_input('End date', value=datetime.now().date())
 
-        if analytics is None and use_oauth and 'creds' in locals() and creds:
-            analytics = build('youtubeAnalytics', 'v2', credentials=creds)
+        if analytics is None and credentials:
+            analytics = build('youtubeAnalytics', 'v2', credentials=credentials)
 
         if st.button('Fetch analytics'):
             channel_id_for_analytics = None
@@ -403,8 +422,8 @@ def main():
                 channel_id_for_analytics = channel_id_analytics
             else:
                 # try to get authorized channel id
-                if yt and use_oauth and 'creds' in locals() and creds:
-                    chinfo = get_channel_stats(yt, credentials=creds)
+                if youtube_client and credentials:
+                    chinfo = get_channel_stats(youtube_client, credentials=credentials)
                     channel_id_for_analytics = chinfo['id'] if chinfo else None
                 elif channel_id_input:
                     channel_id_for_analytics = channel_id_input
