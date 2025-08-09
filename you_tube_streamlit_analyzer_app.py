@@ -499,4 +499,116 @@ def main():
                             st.subheader('Monetization Status (channel)')
                             st.json(monet)
                 else:
-                    st.info('Unable to fetch channel
+                    st.info('Unable to fetch channel stats. Provide channel ID if not using OAuth.')
+        else:
+            st.info('API client not ready. Provide API key or enable OAuth.')
+
+    # --------------------- Today / Realtime section (separate button) ---------------------
+    st.header('Today / Realtime (uploaded since UTC midnight + live)')
+    if youtube_client:
+        if st.button('Fetch today & live videos'):
+            # decide analytics channel id
+            channel_id_for_analytics = None
+            if analytics and credentials:
+                ch_info = get_channel_stats(youtube_client, credentials=credentials)
+                channel_id_for_analytics = ch_info['id'] if ch_info else None
+            elif channel_id_input:
+                channel_id_for_analytics = channel_id_input
+
+            today_videos = fetch_today_videos_full(
+                youtube_client,
+                analytics=analytics,
+                channel_id_for_analytics=channel_id_for_analytics,
+                max_results_today=max_results,
+                use_mock=True
+            )
+
+            if not today_videos:
+                st.info("No videos or livestreams found for today.")
+            else:
+                st.subheader("Today / Live Videos (with Monetization & RPM if available)")
+                st.markdown(render_videos_markdown_table(today_videos), unsafe_allow_html=True)
+
+                st.subheader("Views over time (Today / Live)")
+                plot_views_chart_from_rows(today_videos, "Today / Live — Views")
+    else:
+        st.info('API client not ready. Provide API key or OAuth.')
+
+    # --------------------- Analytics charts and RPM summary ---------------------
+    st.header('YouTube Analytics (Estimated Revenue & Views)')
+    with st.expander('Analytics chart controls (requires OAuth / analytics permission)'):
+        channel_id_analytics = st.text_input('Channel ID for Analytics (leave empty to use authorized channel)', value='')
+        start_date = st.date_input('Start date', value=(datetime.now() - timedelta(days=7)).date())
+        end_date = st.date_input('End date', value=datetime.now().date())
+
+        if analytics is None and credentials:
+            try:
+                analytics = build('youtubeAnalytics', 'v2', credentials=credentials)
+            except Exception as e:
+                st.error(f"Failed to build analytics client: {e}")
+                analytics = None
+
+        if st.button('Fetch analytics'):
+            channel_id_for_analytics = None
+            if channel_id_analytics:
+                channel_id_for_analytics = channel_id_analytics
+            else:
+                # try to get authorized channel id
+                if youtube_client and credentials:
+                    chinfo = get_channel_stats(youtube_client, credentials=credentials)
+                    channel_id_for_analytics = chinfo['id'] if chinfo else None
+                elif channel_id_input:
+                    channel_id_for_analytics = channel_id_input
+
+            if not channel_id_for_analytics:
+                st.error('Channel ID for analytics not available. Provide it or connect via OAuth.')
+            elif analytics is None:
+                st.error('Analytics client not available. Connect via OAuth and grant permissions.')
+            else:
+                df = fetch_analytics(analytics, channel_id_for_analytics, start_date.isoformat(), end_date.isoformat())
+                if df.empty:
+                    st.info('No analytics rows returned. Check permission, date range, or account access.')
+                else:
+                    df = compute_rpm(df)
+                    st.dataframe(df)
+                    avg_rpm = df['rpm'].mean()
+                    st.metric(f"Average RPM ({start_date} to {end_date})", f"${avg_rpm:.2f}")
+
+                    # Views chart
+                    fig1 = plt.figure()
+                    plt.plot(pd.to_datetime(df['date']), df['views'])
+                    plt.title('Daily Views')
+                    plt.xlabel('Date')
+                    plt.ylabel('Views')
+                    st.pyplot(fig1)
+
+                    # Revenue chart
+                    fig2 = plt.figure()
+                    plt.plot(pd.to_datetime(df['date']), df['estimatedRevenue'])
+                    plt.title('Estimated Revenue')
+                    plt.xlabel('Date')
+                    plt.ylabel('Revenue')
+                    st.pyplot(fig2)
+
+                    # RPM chart
+                    fig3 = plt.figure()
+                    plt.plot(pd.to_datetime(df['date']), df['rpm'])
+                    plt.title('RPM (estimated)')
+                    plt.xlabel('Date')
+                    plt.ylabel('RPM')
+                    st.pyplot(fig3)
+
+    # Footer / notes
+    with st.expander("Notes: RPM & Monetization"):
+        st.markdown("""
+        - RPM and Estimated Revenue are fetched from YouTube Analytics (requires OAuth & appropriate access).
+        - Monetization status is returned by the Data API per-video under `status.monetizationStatus` (only for videos accessible to the authenticated account).
+        - If you use only an API key (no OAuth), the app uses mock values: `RPM = $2.50` and `Monetization = "Enabled"`.
+        - Analytics queries may return no data for very new videos or channels without revenue.
+        - Quotas: be mindful of API quota consumption. Reduce polling frequency or max_results to save quota.
+        """)
+
+    st.success('App ready — use controls and connect OAuth for full RPM/Monetization data.')
+
+if __name__ == "__main__":
+    main()
