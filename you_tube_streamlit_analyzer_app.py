@@ -1,24 +1,3 @@
-"""
-Streamlit app: YouTube Realtime & Daily Analyzer
-- Features:
-  1. Find videos published today and show those that reached 1000+ views (fastest to 1k).
-  2. List all videos published today.
-  3. Attempt to fetch RPM / Monetization / Subs / Views for the channel (requires OAuth & YouTube Analytics API).
-  4. Draw line charts for views and estimated revenue over a chosen date range.
-
-Setup (brief):
-- Create a Google Cloud project, enable: YouTube Data API v3 and YouTube Analytics API.
-- Create OAuth 2.0 Client ID (Desktop or Web) and download client_secrets.json.
-- Put client_secrets.json in the app folder or set env var.
-- Install requirements: pip install --upgrade google-auth google-auth-oauthlib google-api-python-client streamlit matplotlib pandas
-- To deploy: push repo to GitHub and connect to Streamlit Cloud (or run locally with `streamlit run app.py`).
-
-Notes & limitations:
-- RPM/estimatedRevenue require access to the channel's YouTube Analytics data. You must log in with the Google account that owns the channel and grant analytics scopes.
-- Monetization status isn't fully exposed via public Data API for some accounts; we try to read channel `status` and `monetizationDetails` where available, otherwise fallback to manual check instructions.
-- "Real-time" means the app polls the Data API. YouTube Data API has quota limits; be conservative with polling frequency.
-"""
-
 import streamlit as st
 from datetime import datetime, timedelta, timezone
 import time
@@ -39,14 +18,16 @@ SCOPES = [
 st.set_page_config(page_title="YouTube Realtime Analyzer", layout='wide')
 st.title('YouTube Realtime & Daily Analyzer')
 
-# Sidebar: credentials & options
+# Sidebar: credentials & options + channel ID input
 st.sidebar.header('Credentials & Options')
 api_key = st.sidebar.text_input('YouTube Data API Key (optional)', value='')
 use_oauth = st.sidebar.checkbox('Use OAuth (recommended for RPM/Analytics)', value=False)
-client_secrets_path = st.sidebar.text_input('path to client_secrets.json (if using OAuth)', value='client_secrets.json')
-
+client_secrets_path = st.sidebar.text_input('Path to client_secrets.json (if using OAuth)', value='client_secrets.json')
 poll_interval = st.sidebar.number_input('Auto-refresh poll interval (seconds)', min_value=15, max_value=3600, value=60)
 max_results = st.sidebar.slider('Search max results per call', min_value=5, max_value=50, value=10)
+
+# New: channel ID input for public data (required if no OAuth)
+channel_id_input = st.sidebar.text_input('Channel ID (required if not using OAuth)', value='')
 
 # Helper: ISO timestamp for start of today in UTC
 def today_iso_start_utc():
@@ -110,15 +91,22 @@ def fetch_videos_published_today(youtube, published_after_iso, max_results=10):
             st.error(f'YouTube API error: {e}')
         return []
 
-# Get channel stats
-def get_channel_stats(youtube, for_username_or_id=None):
+# Get channel stats (updated to handle OAuth vs API key + channel id)
+def get_channel_stats(youtube, credentials=None, channel_id=None):
     try:
-        if for_username_or_id is None:
+        if credentials:
+            # OAuth present → use mine=True to get authorized user's channel
             res = youtube.channels().list(part='snippet,statistics,status,contentDetails', mine=True).execute()
         else:
-            res = youtube.channels().list(part='snippet,statistics,status,contentDetails', id=for_username_or_id).execute()
+            if channel_id:
+                # API key only, must specify channel id
+                res = youtube.channels().list(part='snippet,statistics,status,contentDetails', id=channel_id).execute()
+            else:
+                st.error('Channel ID must be provided in the sidebar if not using OAuth.')
+                return None
         items = res.get('items', [])
         if not items:
+            st.warning('No channel data found.')
             return None
         ch = items[0]
         return {
@@ -216,7 +204,7 @@ with col2:
     st.header('Channel / Analytics')
     if yt:
         if st.button('Get channel statistics'):
-            ch = get_channel_stats(yt)
+            ch = get_channel_stats(yt, credentials=credentials if use_oauth else None, channel_id=channel_id_input if not use_oauth else None)
             if ch:
                 st.metric('Subscribers', f"{ch['subscribers']}")
                 st.metric('Channel Views', f"{ch['views']}")
@@ -230,22 +218,22 @@ with col2:
 # Analytics charts
 st.header('Views & Estimated Revenue (Analytics)')
 with st.expander('Analytics chart controls (requires OAuth & analytics permission)'):
-    channel_id_input = st.text_input('Channel ID (leave empty to use authorized channel)', value='')
+    channel_id_analytics = st.text_input('Channel ID (leave empty to use authorized channel)', value='')
     end_date = st.date_input('End date', value=datetime.now().date())
     start_date = st.date_input('Start date', value=(datetime.now() - timedelta(days=7)).date())
     if analytics is None and use_oauth and credentials:
         analytics = build('youtubeAnalytics', 'v2', credentials=credentials)
     if st.button('Fetch analytics'):
         ch = None
-        if not channel_id_input:
-            chinfo = get_channel_stats(yt)
+        if not channel_id_analytics:
+            chinfo = get_channel_stats(yt, credentials=credentials if use_oauth else None, channel_id=channel_id_input if not use_oauth else None)
             if chinfo:
                 channel_id = chinfo['id']
             else:
                 st.error('Unable to determine authorized channel id. Provide channel id manually.')
                 channel_id = None
         else:
-            channel_id = channel_id_input
+            channel_id = channel_id_analytics
         if channel_id and analytics:
             df = fetch_analytics(analytics, channel_id, start_date.isoformat(), end_date.isoformat())
             if df.empty:
