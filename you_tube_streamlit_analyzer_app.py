@@ -46,7 +46,7 @@ use_oauth = st.sidebar.checkbox('Use OAuth (recommended for RPM/Analytics)', val
 client_secrets_path = st.sidebar.text_input('path to client_secrets.json (if using OAuth)', value='client_secrets.json')
 
 poll_interval = st.sidebar.number_input('Auto-refresh poll interval (seconds)', min_value=15, max_value=3600, value=60)
-max_results = st.sidebar.slider('Search max results per call', min_value=10, max_value=50, value=50)
+max_results = st.sidebar.slider('Search max results per call', min_value=5, max_value=50, value=10)
 
 # Helper: ISO timestamp for start of today in UTC
 def today_iso_start_utc():
@@ -71,8 +71,7 @@ def run_oauth_flow(client_secrets_file: str):
     return creds
 
 # Get videos published today (search + videos().list)
-def fetch_videos_published_today(youtube, published_after_iso, max_results=50):
-    # Use search.list to get video ids published after start of day
+def fetch_videos_published_today(youtube, published_after_iso, max_results=10):
     try:
         req = youtube.search().list(
             part='snippet',
@@ -85,7 +84,6 @@ def fetch_videos_published_today(youtube, published_after_iso, max_results=50):
         video_ids = [item['id']['videoId'] for item in res.get('items', [])]
         if not video_ids:
             return []
-        # batch fetch statistics
         vids = []
         for i in range(0, len(video_ids), 50):
             batch = video_ids[i:i+50]
@@ -106,13 +104,15 @@ def fetch_videos_published_today(youtube, published_after_iso, max_results=50):
                 })
         return vids
     except HttpError as e:
-        st.error(f'YouTube API error: {e}')
+        if e.resp.status == 403:
+            st.error("YouTube API quota exceeded. Please wait or reduce polling frequency.")
+        else:
+            st.error(f'YouTube API error: {e}')
         return []
 
 # Get channel stats
 def get_channel_stats(youtube, for_username_or_id=None):
     try:
-        # If for_username_or_id is None, get authorized channel via 'mine=true'
         if for_username_or_id is None:
             res = youtube.channels().list(part='snippet,statistics,status,contentDetails', mine=True).execute()
         else:
@@ -136,7 +136,6 @@ def get_channel_stats(youtube, for_username_or_id=None):
 
 # Analytics: fetch estimatedRevenue and views for date range
 def fetch_analytics(analytics, channel_id, start_date, end_date):
-    # date format YYYY-MM-DD
     try:
         res = analytics.reports().query(
             ids='channel==' + channel_id,
@@ -145,7 +144,6 @@ def fetch_analytics(analytics, channel_id, start_date, end_date):
             metrics='estimatedRevenue,views',
             dimensions='day'
         ).execute()
-        # Parse rows
         cols = [h['name'] for h in res.get('columnHeaders', [])]
         rows = res.get('rows', [])
         data = []
@@ -161,9 +159,8 @@ def fetch_analytics(analytics, channel_id, start_date, end_date):
 
 # Compute RPM
 def compute_rpm(df):
-    # RPM = (estimatedRevenue / views) * 1000
     df = df.copy()
-    df['rpm'] = df.apply(lambda r: (r['estimatedRevenue'] / r['views'] * 1000) if r['views']>0 else 0, axis=1)
+    df['rpm'] = df.apply(lambda r: (r['estimatedRevenue'] / r['views'] * 1000) if r['views'] > 0 else 0, axis=1)
     return df
 
 # UI: Credentials
@@ -175,7 +172,6 @@ if use_oauth:
             creds = run_oauth_flow(client_secrets_path)
             credentials = creds
             st.success('OAuth connected — use the controls to fetch analytics.')
-            # build analytics client
             analytics = build('youtubeAnalytics', 'v2', credentials=creds)
     else:
         st.sidebar.warning('client_secrets.json not found at the path provided.')
@@ -190,7 +186,7 @@ else:
     st.warning('Provide an API key or enable OAuth to use the Data API features.')
 
 # Main controls
-col1, col2 = st.columns([2,1])
+col1, col2 = st.columns([2, 1])
 with col1:
     st.header('Realtime / Today Feeds')
     if yt:
@@ -204,14 +200,13 @@ with col1:
                 df['publishedAt'] = pd.to_datetime(df['publishedAt'])
                 df = df.sort_values('publishedAt')
                 st.subheader('All videos published today')
-                st.dataframe(df[['title','videoId','publishedAt','viewCount']])
+                st.dataframe(df[['title', 'videoId', 'publishedAt', 'viewCount']])
 
-                # Videos >= 1000 views and fastest to reach 1k: approximate by publishedAt order
-                reached = df[df['viewCount']>=1000].copy()
+                reached = df[df['viewCount'] >= 1000].copy()
                 if not reached.empty:
                     reached = reached.sort_values('publishedAt')
                     st.subheader('Videos published today that have >= 1000 views (earliest published first)')
-                    st.dataframe(reached[['title','videoId','publishedAt','viewCount']])
+                    st.dataframe(reached[['title', 'videoId', 'publishedAt', 'viewCount']])
                 else:
                     st.info('No videos published today have reached 1000+ views yet.')
     else:
@@ -237,11 +232,10 @@ st.header('Views & Estimated Revenue (Analytics)')
 with st.expander('Analytics chart controls (requires OAuth & analytics permission)'):
     channel_id_input = st.text_input('Channel ID (leave empty to use authorized channel)', value='')
     end_date = st.date_input('End date', value=datetime.now().date())
-    start_date = st.date_input('Start date', value=(datetime.now()-timedelta(days=7)).date())
+    start_date = st.date_input('Start date', value=(datetime.now() - timedelta(days=7)).date())
     if analytics is None and use_oauth and credentials:
         analytics = build('youtubeAnalytics', 'v2', credentials=credentials)
     if st.button('Fetch analytics'):
-        # ensure channel id
         ch = None
         if not channel_id_input:
             chinfo = get_channel_stats(yt)
@@ -259,7 +253,6 @@ with st.expander('Analytics chart controls (requires OAuth & analytics permissio
             else:
                 df = compute_rpm(df)
                 st.dataframe(df)
-                # Plot views
                 fig1 = plt.figure()
                 plt.plot(pd.to_datetime(df['date']), df['views'])
                 plt.title('Daily Views')
@@ -267,7 +260,6 @@ with st.expander('Analytics chart controls (requires OAuth & analytics permissio
                 plt.ylabel('Views')
                 st.pyplot(fig1)
 
-                # Plot estimated revenue
                 fig2 = plt.figure()
                 plt.plot(pd.to_datetime(df['date']), df['estimatedRevenue'])
                 plt.title('Estimated Revenue (local currency in Analytics)')
@@ -275,7 +267,6 @@ with st.expander('Analytics chart controls (requires OAuth & analytics permissio
                 plt.ylabel('Revenue')
                 st.pyplot(fig2)
 
-                # Plot RPM
                 fig3 = plt.figure()
                 plt.plot(pd.to_datetime(df['date']), df['rpm'])
                 plt.title('RPM (estimated)')
@@ -285,37 +276,17 @@ with st.expander('Analytics chart controls (requires OAuth & analytics permissio
         else:
             st.error('Analytics client not available or channel id missing. Ensure OAuth is connected and you granted analytics scope.')
 
-# Auto-refresh loop (simple)
-st.sidebar.markdown('---')
-if st.sidebar.button('Start auto-refresh (poll)'):
-    if not yt:
-        st.sidebar.error('API client not ready.')
-    else:
-        st.sidebar.info('Starting simple poll — press Stop in the console to end. (This is a basic demo; deploy with care.)')
-        try:
-            while True:
-                start_iso = today_iso_start_utc()
-                vids = fetch_videos_published_today(yt, start_iso, max_results=max_results)
-                df = pd.DataFrame(vids)
-                if not df.empty:
-                    df['publishedAt'] = pd.to_datetime(df['publishedAt'])
-                    df = df.sort_values('publishedAt')
-                    st.experimental_rerun()
-                time.sleep(poll_interval)
-        except KeyboardInterrupt:
-            st.sidebar.info('Polling stopped.')
-
 # Footer / instructions
-st.markdown('''
-### Deployment & GitHub
-1. Put this file in a Git repository along with `requirements.txt` and your `client_secrets.json` (keep secrets out of public repos!).
-2. On Streamlit Cloud: connect the GitHub repo and set required secrets as environment variables (e.g., GOOGLE_CLIENT_SECRETS or use an OAuth flow locally).
-3. Consider caching results and using a backend worker (Cloud Run / AWS Lambda) to poll frequently to avoid hitting the Data API quota.
+with st.expander("Show Deployment & Accuracy Notes"):
+    st.markdown("""
+    ### Deployment & GitHub
+    - Put this file in a Git repository along with `requirements.txt` and your `client_secrets.json` (keep secrets out of public repos!).
+    - On Streamlit Cloud: connect the GitHub repo and set required secrets as environment variables (e.g., `GOOGLE_CLIENT_SECRETS`) or use an OAuth flow locally.
+    - Consider caching results and using a backend worker (Cloud Run / AWS Lambda) to poll frequently to avoid hitting the Data API quota.
 
-### About accuracy & limitations
-- "Fastest to 1000 views" is approximated by checking which videos published earlier *already* have >=1000 views. To measure exact time-to-1k you must poll frequently and record timestamps when each video crosses thresholds.
-- RPM (Revenue per mille) is estimated from the Analytics API `estimatedRevenue`. It may not match final payments and depends on currency & sampling.
-
-''')
+    ### About Accuracy & Limitations
+    - **\"Fastest to 1000 views\"** is approximated by checking which videos published earlier already have ≥1000 views. To measure exact time-to-1k, you must poll frequently and record timestamps when each video crosses thresholds.
+    - **RPM (Revenue per mille)** is estimated from the Analytics API `estimatedRevenue`. It may not match final payments and depends on currency & sampling.
+    """)
 
 st.success('App ready. Use the controls above; full instructions are in the code comments.')
