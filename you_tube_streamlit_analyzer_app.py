@@ -29,9 +29,9 @@ max_results = st.sidebar.slider('Search max results per call', min_value=5, max_
 # New: channel ID input for public data (required if no OAuth)
 channel_id_input = st.sidebar.text_input('Channel ID (required if not using OAuth)', value='')
 
-# Helper: ISO timestamp for 24 hours ago in UTC (expanded window for debug)
+# Helper: ISO timestamp for 3 days ago in UTC (wider window)
 def default_published_after():
-    return (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    return (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
 
 # Build YouTube API client (Data API)
 @st.cache_resource
@@ -49,7 +49,7 @@ def run_oauth_flow(client_secrets_file: str):
     creds = flow.run_local_server(port=0)
     return creds
 
-# Get videos published today (search + videos().list) with debug
+# Get videos published recently with generic query q='a' and debug
 def fetch_videos_published_today(youtube, published_after_iso, max_results=10):
     try:
         req = youtube.search().list(
@@ -57,7 +57,8 @@ def fetch_videos_published_today(youtube, published_after_iso, max_results=10):
             type='video',
             order='date',
             publishedAfter=published_after_iso,
-            maxResults=max_results
+            maxResults=max_results,
+            q='a'  # generic query to get more results
         )
         res = req.execute()
         # DEBUG: Show raw search response
@@ -183,7 +184,7 @@ with col1:
     st.header('Realtime / Today Feeds')
     if yt:
         if st.button('Fetch videos published today'):
-            # Use 24 hours ago for publishedAfter (expanded window)
+            # Use 3 days ago for publishedAfter (wider window)
             start_iso = default_published_after()
             vids = fetch_videos_published_today(yt, start_iso, max_results=max_results)
             if not vids:
@@ -192,16 +193,16 @@ with col1:
                 df = pd.DataFrame(vids)
                 df['publishedAt'] = pd.to_datetime(df['publishedAt'])
                 df = df.sort_values('publishedAt')
-                st.subheader('All videos published today')
+                st.subheader('All videos published recently')
                 st.dataframe(df[['title', 'videoId', 'publishedAt', 'viewCount']])
 
                 reached = df[df['viewCount'] >= 1000].copy()
                 if not reached.empty:
                     reached = reached.sort_values('publishedAt')
-                    st.subheader('Videos published today that have >= 1000 views (earliest published first)')
+                    st.subheader('Videos published recently that have >= 1000 views (earliest published first)')
                     st.dataframe(reached[['title', 'videoId', 'publishedAt', 'viewCount']])
                 else:
-                    st.info('No videos published today have reached 1000+ views yet.')
+                    st.info('No videos published recently have reached 1000+ views yet.')
     else:
         st.info('API client not ready. Provide API key or OAuth.')
 
